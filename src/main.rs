@@ -72,25 +72,32 @@ enum Expr {
 }
 
 impl Expr {
-    fn calc(&self, variables: &HashMap<String, f64>) -> f64 {
+    fn calc(&self, variables: &HashMap<String, f64>) -> Result<f64, InvalidExpressionError> {
         match self {
-            Expr::Value(v) => *v,
-            Expr::Variable(v) => variables[v],
+            Expr::Value(v) => Ok(*v),
+            Expr::Variable(v) => {
+                if let Some(v) = variables.get(v) {
+                    Ok(*v)
+                }
+                else {
+                    Err( InvalidExpressionError::UknownVariable(v.clone()) )
+                }
+            },
             Expr::Operation(op) => {
-                let lhs = op.lhs.calc(variables);
-                let rhs = op.rhs.calc(variables);
+                let lhs = op.lhs.calc(variables)?;
+                let rhs = op.rhs.calc(variables)?;
 
                 use OpType::*;
 
-                match op.op {
+                Ok(match op.op {
                     Plus => lhs + rhs,
                     Sub => lhs - rhs,
                     Mul => lhs * rhs,
                     Div => lhs / rhs
-                }
+                })
             },
             Expr::Function(fun) => {
-                (fun.fun)( fun.arg.calc(variables) )
+                Ok((fun.fun)( fun.arg.calc(variables)? )) 
             }
         }
     }
@@ -189,9 +196,11 @@ fn tokenize(str: &str) -> ResultDyn<Vec<Token>> {
 }
 
 #[derive(Error, Debug, Clone)]
-enum MalformedExpressionError {
-    #[error("Uknown function `{0}`")]
+enum InvalidExpressionError {
+    #[error("Couldn't find function `{0}`")]
     UknownFunction(String),
+    #[error("Couldn't find variable `{0}`")]
+    UknownVariable(String),
     #[error("Malformed expression, expected {expected}, found token {found:?}")]
     InvalidToken {
         expected: &'static str,
@@ -202,13 +211,13 @@ enum MalformedExpressionError {
         start: Token,
         end: Option<Token>
     },
-    #[error("Couldn't find a valid action at tokens {0:?}")]
+    #[error("Couldn't find a valid operation in tokens {0:?}")]
     AmbiguousOperation(Vec<Token>)
 }
 
 trait AdvanceToMatchingParen 
 where Self: std::marker::Sized {
-    fn advance_to_matching_paren(self) -> Result<Self, MalformedExpressionError>;
+    fn advance_to_matching_paren(self) -> Result<Self, InvalidExpressionError>;
 }
 
 macro_rules! advanceable_to_matching_paren {
@@ -216,7 +225,7 @@ macro_rules! advanceable_to_matching_paren {
         $(
             impl AdvanceToMatchingParen for $ty {
                 /// Constructs an iterator that returns the matching parenthesise
-                fn advance_to_matching_paren(mut self) -> Result<Self, MalformedExpressionError> {
+                fn advance_to_matching_paren(mut self) -> Result<Self, InvalidExpressionError> {
                     let mut scope = 0;
 
                     let mut last_token: Option<&Token> = None;
@@ -234,7 +243,7 @@ macro_rules! advanceable_to_matching_paren {
                     }
 
                     if scope >= 0 {
-                        Err(MalformedExpressionError::NoMatchingToken { start: Token::LeftParen, end: last_token.cloned() })
+                        Err(InvalidExpressionError::NoMatchingToken { start: Token::LeftParen, end: last_token.cloned() })
                     }
                     else {
                         Ok(self)
@@ -248,7 +257,7 @@ macro_rules! advanceable_to_matching_paren {
 advanceable_to_matching_paren!(std::slice::Iter<'_, Token>, std::iter::Skip<std::slice::Iter<'_, Token>>);
 
 impl AdvanceToMatchingParen for std::iter::Enumerate<std::slice::Iter<'_, Token>> {
-    fn advance_to_matching_paren(mut self) -> Result<Self, MalformedExpressionError> {
+    fn advance_to_matching_paren(mut self) -> Result<Self, InvalidExpressionError> {
         let mut scope = 0;
 
         let mut last_token: Option<&Token> = None;
@@ -266,7 +275,7 @@ impl AdvanceToMatchingParen for std::iter::Enumerate<std::slice::Iter<'_, Token>
         }
 
         if scope >= 0 {
-            Err(MalformedExpressionError::NoMatchingToken { start: Token::LeftParen, end: last_token.cloned() })
+            Err(InvalidExpressionError::NoMatchingToken { start: Token::LeftParen, end: last_token.cloned() })
         }
         else {
             Ok(self)
@@ -274,14 +283,12 @@ impl AdvanceToMatchingParen for std::iter::Enumerate<std::slice::Iter<'_, Token>
     }
 }
 
-fn parse(tokens: &[Token], functions: &HashMap<String, FunType>) -> Result<Expr, MalformedExpressionError> {
-    println!("{:?}", tokens);
-
+fn parse(tokens: &[Token], functions: &HashMap<String, FunType>) -> Result<Expr, InvalidExpressionError> {
     if tokens.len() == 1 {
         match tokens.first() {
             Some(Token::Number(num)) => Ok(Expr::Value(*num)),
             Some(Token::Identifier(v)) => Ok(Expr::Variable(v.clone())),
-            _ => Err(MalformedExpressionError::InvalidToken { 
+            _ => Err(InvalidExpressionError::InvalidToken { 
                 expected: "Token::Number | Token::Identifier", 
                 found: tokens.first().cloned()
             })
@@ -329,11 +336,11 @@ fn parse(tokens: &[Token], functions: &HashMap<String, FunType>) -> Result<Expr,
                     }))
                 }
                 else {
-                    Err(MalformedExpressionError::UknownFunction(id.clone()))
+                    Err(InvalidExpressionError::UknownFunction(id.clone()))
                 }
             }
             else {
-                Err(MalformedExpressionError::AmbiguousOperation(tokens.to_vec()))
+                Err(InvalidExpressionError::AmbiguousOperation(tokens.to_vec()))
             }
         }
         else if let Token::Op(op) = tokens[idx] {
@@ -347,15 +354,27 @@ fn parse(tokens: &[Token], functions: &HashMap<String, FunType>) -> Result<Expr,
     }
 }
 
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+#[clap(name = "Math Expression Parser")]
+#[clap(version = "0.1")]
+struct Cli {
+    #[clap(subcommand)]
+    subcommand: Commands,
+    #[clap(long, short = 'v')]
+    verbose: bool
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    Calc { expression: String },
+    Graph { expression: String },
+    Cli
+}
+
 fn main() -> ResultDyn<()> {
-
-    let input = std::env::args().skip(1).reduce(|a, x|{ a + " " + &x }).unwrap();
-
-    println!("> Input\n{}", input);
-
-    let tokens = tokenize(&input)?;
-
-    println!("> Tokens\n{:#?}", tokens);
+    let cli = Cli::parse();
 
     let functions: HashMap<String, FunType> = HashMap::from([
         ("cos".into(), f64::cos as FunType),
@@ -364,20 +383,48 @@ fn main() -> ResultDyn<()> {
         ("add".into(), |x|{ x + 1.0 })
     ]);
 
-    let mut variables: HashMap<String, f64> = HashMap::from([
-        ("x".into(), 0.0)
-    ]);
+    let log = |e: &InvalidExpressionError|{ println!("{}", e) };
 
-    #[allow(unstable_name_collisions)]
-    let parsed = parse(&tokens, &functions)
-        .inspect_err(|e|{ println!("{}", e) })
-        .unwrap();
+    match &cli.subcommand {
+        Commands::Calc { expression } | Commands::Graph { expression } => {
 
-    println!("> AST\n{:#?}\n> Value", parsed);
+            let tokens = tokenize(expression)?;
 
-    for i in 0..=10 {
-        *variables.get_mut("x").unwrap() = f64::from(i);
-        println!("{}", parsed.calc(&variables));
+            let parsed = parse(&tokens, &functions)
+                .my_inspect_err(log)
+                .unwrap();
+
+            if cli.verbose {
+                println!("> Input\n{}", expression);
+                println!("> Tokens\n{:#?}", tokens);
+                println!("> AST\n{:#?}\n> Value", parsed);
+            }
+
+            match &cli.subcommand {
+                Commands::Calc { .. } => {
+                    let variables: HashMap<String, f64> = HashMap::new();
+
+                    println!("{} = {}", expression, parsed.calc(&variables)
+                        .my_inspect_err(log)
+                        .unwrap());
+                },
+                Commands::Graph { .. } => {
+                    let mut variables: HashMap<String, f64> = HashMap::from([
+                        ("x".into(), 0.0)
+                    ]);
+
+                    for i in 0..=10 {
+                        variables.insert("x".to_string(), f64::from(i));
+
+                        println!("{}", parsed.calc(&variables)
+                            .my_inspect_err(log)
+                            .unwrap());
+                    }
+                },
+                _ => unreachable!()
+            }
+        },
+        Commands::Cli => unimplemented!()
     }
 
     // match parsed {

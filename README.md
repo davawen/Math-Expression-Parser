@@ -1,4 +1,4 @@
-# Math Expression Parser
+# **M**a**th** Expression Pars**er**
 
 It parses math expressions!  
 
@@ -6,7 +6,7 @@ It parses math expressions!
 
 Usage is as follows:
 ```
-$ cargo run {subcommand} [expression]
+$ mether {subcommand} [expression]
 ````
 
 Where the subcommands can be:
