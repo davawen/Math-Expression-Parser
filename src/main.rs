@@ -1,12 +1,16 @@
 use core::fmt;
 use std::{
     error,
-    collections::HashMap
+    collections::HashMap, fmt::Display
 };
+use itertools::Itertools;
+use termion::cursor::DetectCursorPos;
 use thiserror::Error;
 
-mod inspect_err;
+mod lerp;
+use lerp::Lerp;
 
+mod inspect_err;
 use inspect_err::InspectErr;
 
 type ResultDyn<T> = std::result::Result<T, Box<dyn error::Error>>;
@@ -41,6 +45,7 @@ struct Op {
 }
 
 type FunType = fn(f64) -> f64;
+type FunMap<'a> = HashMap<&'a str, FunType>;
 
 struct Function {
     arg: Box<Expr>,
@@ -127,10 +132,10 @@ fn tokenize(str: &str) -> ResultDyn<Vec<Token>> {
             
             // Use prefix to indicate base
             if c == '0' {
-                match chars.peek().unwrap() {
-                    'x' | 'X' => radix = 16,
-                    'o' | 'O' => radix = 8,
-                    'b' | 'B' => radix = 2,
+                match chars.peek() {
+                    Some('x' | 'X') => radix = 16,
+                    Some('o' | 'O') => radix = 8,
+                    Some('b' | 'B') => radix = 2,
                     _ => ()
                 }
 
@@ -145,8 +150,6 @@ fn tokenize(str: &str) -> ResultDyn<Vec<Token>> {
                 sum = c.to_digit(radix).unwrap().try_into()?;
             }
             
-
-
             while let Some(n) = chars.peek() {
                 if n.is_digit(radix) {
                     let n = chars.next().unwrap();
@@ -283,7 +286,7 @@ impl AdvanceToMatchingParen for std::iter::Enumerate<std::slice::Iter<'_, Token>
     }
 }
 
-fn parse(tokens: &[Token], functions: &HashMap<String, FunType>) -> Result<Expr, InvalidExpressionError> {
+fn parse(tokens: &[Token], functions: &FunMap) -> Result<Expr, InvalidExpressionError> {
     if tokens.len() == 1 {
         match tokens.first() {
             Some(Token::Number(num)) => Ok(Expr::Value(*num)),
@@ -329,7 +332,7 @@ fn parse(tokens: &[Token], functions: &HashMap<String, FunType>) -> Result<Expr,
             let mut it = tokens.iter();
             
             if let ( Some(Token::Identifier(id)), Some(Token::LeftParen), Some(Token::RightParen) ) = ( it.next(), it.next(), it.last() ) {
-                if let Some(fun) = functions.get(id) {
+                if let Some(fun) = functions.get(id.as_str()) {
                     Ok(Expr::Function(Function {
                         arg: Box::new( parse( &tokens[2..tokens.len()-1], functions )? ),
                         fun: *fun
@@ -369,24 +372,37 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     Calc { expression: String },
-    Graph { expression: String },
+    Graph { 
+        #[clap(short = 'x', default_value_t = 0.0)]
+        origin: f64,
+        #[clap(short = 'w', default_value_t = 1.0)]
+        width: f64,
+        expression: String
+    },
     Cli
 }
 
 fn main() -> ResultDyn<()> {
     let cli = Cli::parse();
 
-    let functions: HashMap<String, FunType> = HashMap::from([
-        ("cos".into(), f64::cos as FunType),
-        ("sin".into(), f64::sin),
-        ("tan".into(), f64::tan),
-        ("add".into(), |x|{ x + 1.0 })
+    macro_rules! f64_fn_tuple {
+        ($func_name:ident) => {
+            (stringify!($func_name), f64::$func_name as FunType)
+        }
+    }
+
+    let functions: FunMap = HashMap::from([
+        f64_fn_tuple!(cos),
+        f64_fn_tuple!(sin),
+        f64_fn_tuple!(tan),
+        f64_fn_tuple!(log2),
+        f64_fn_tuple!(ln),
     ]);
 
     let log = |e: &InvalidExpressionError|{ println!("{}", e) };
 
     match &cli.subcommand {
-        Commands::Calc { expression } | Commands::Graph { expression } => {
+        Commands::Calc { expression } | Commands::Graph { expression, .. } => {
 
             let tokens = tokenize(expression)?;
 
@@ -408,32 +424,76 @@ fn main() -> ResultDyn<()> {
                         .my_inspect_err(log)
                         .unwrap());
                 },
-                Commands::Graph { .. } => {
+                Commands::Graph { origin, width, ..} => {
                     let mut variables: HashMap<String, f64> = HashMap::from([
                         ("x".into(), 0.0)
                     ]);
 
-                    for i in 0..=10 {
-                        variables.insert("x".to_string(), f64::from(i));
+                    let points: Vec<_> = (0..100)
+                        .map(|x| { x.lerp_map(0.0, 100.0, *origin, *origin + *width) })
+                        .map(|x| {
+                            variables.insert("x".to_owned(), x);
 
-                        println!("{}", parsed.calc(&variables)
-                            .my_inspect_err(log)
-                            .unwrap());
+                            parsed.calc(&variables)
+                                .my_inspect_err(log)
+                                .unwrap()
+                        })
+                        .map(|x| { if !x.is_finite() { 0.0 } else { x }})
+                        .collect();
+
+                    let float_cmp = |x: &&f64, y: &&f64|{ x.partial_cmp(y).unwrap() };
+
+                    let ( min, max ) = ( *points.iter().min_by(float_cmp).unwrap(), *points.iter().max_by(float_cmp).unwrap() );
+
+                    // Minimum range around min/max
+                    let ( min, max ) = if max - min < 1.0 {
+                        ( min - 0.5, max + 0.5)
                     }
+                    else { ( min, max ) };
+
+                    let min = f64::min(min, 0.0);
+
+                    // Map absolute value into grid space
+                    let points = points.into_iter().map( |x| {
+                        x.lerp_map(min, max, 0.0, 90.0).floor() as u16
+                    });
+
+                    use termion::cursor;
+
+                    // Draw graph boundaries
+                    println!("{}{}", termion::clear::All, cursor::Goto(1, 1));
+
+                    print!("{:>7.3} │ {}\n{:>7.3} └", max, "\n        │".repeat(28), min);
+
+                    print!("{}{}", "─".repeat(50), cursor::Left(50));
+                    print!("{}{:<7.3}{}{:<7.3}", cursor::Down(1), origin, cursor::Right(40), width);
+                    print!("{}{}", cursor::Up(1), cursor::Left(50 + 5 - 1));
+
+                    let braille = |bitmask| {
+                        char::from_u32(0x2800_u32 + bitmask).unwrap()
+                    };
+
+                    for (p1, p2) in points.tuples() {
+                        // Invert bitmask, braille character's dots go down instead of up
+                        let ( p1, p1_c ) = ( p1 / 3, 1 << (2 - p1 % 3) );
+                        let ( p2, p2_c ) = ( p2 / 3, 1 << (5 - p2 % 3) );
+
+                        if p1 == p2 {
+                            print!("{}{}{}", cursor::Up(p1), braille(p1_c | p2_c), cursor::Down(p1));
+                        }
+                        else {
+                            print!("{}{}{}{}", cursor::Up(p1), braille(p1_c), cursor::Left(1), cursor::Down(p1)); 
+                            print!("{}{}{}", cursor::Up(p2), braille(p2_c), cursor::Down(p2));
+                        }
+                    }
+
+                    println!("{}", cursor::Down(1));
                 },
                 _ => unreachable!()
             }
         },
         Commands::Cli => unimplemented!()
     }
-
-    // match parsed {
-    //     Ok(parsed) => println!("> AST\n{:#?}\n> Value\n{}", parsed, parsed.calc()),
-    //     Err(err) => {
-    //         println!("{}", err);
-    //     }
-    // }
-
 
     Ok(())
 }

@@ -24,3 +24,7 @@ Non decimal number are supported: `0x` prefix allows hexadecimal, `0o` allows oc
 ## Dependencies
 
 - `thiserror`
+- `clap`
+- `termion`
+- `num-traits`
+- `itertools`
