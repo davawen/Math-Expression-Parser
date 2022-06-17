@@ -1,10 +1,9 @@
 use core::fmt;
 use std::{
     error,
-    collections::HashMap, fmt::Display
+    collections::HashMap, cmp::Ordering
 };
 use itertools::Itertools;
-use termion::cursor::DetectCursorPos;
 use thiserror::Error;
 
 mod lerp;
@@ -424,13 +423,15 @@ fn main() -> ResultDyn<()> {
                         .my_inspect_err(log)
                         .unwrap());
                 },
-                Commands::Graph { origin, width, ..} => {
+                &Commands::Graph { origin, width, ..} => {
                     let mut variables: HashMap<String, f64> = HashMap::from([
                         ("x".into(), 0.0)
                     ]);
 
+                    let right_bound = origin + width;
+
                     let points: Vec<_> = (0..100)
-                        .map(|x| { x.lerp_map(0.0, 100.0, *origin, *origin + *width) })
+                        .map(|x| { x.lerp_map(0.0, 100.0, origin, right_bound) })
                         .map(|x| {
                             variables.insert("x".to_owned(), x);
 
@@ -438,20 +439,26 @@ fn main() -> ResultDyn<()> {
                                 .my_inspect_err(log)
                                 .unwrap()
                         })
-                        .map(|x| { if !x.is_finite() { 0.0 } else { x }})
                         .collect();
 
-                    let float_cmp = |x: &&f64, y: &&f64|{ x.partial_cmp(y).unwrap() };
+                    let float_cmp = |x: &&f64, y: &&f64|{
+                        if x.is_finite() && y.is_finite() {
+                            x.partial_cmp(y).unwrap()
+                        }
+                        else { // Don't compare infinite values
+                            Ordering::Equal
+                        }
+                    };
 
                     let ( min, max ) = ( *points.iter().min_by(float_cmp).unwrap(), *points.iter().max_by(float_cmp).unwrap() );
 
                     // Minimum range around min/max
-                    let ( min, max ) = if max - min < 1.0 {
-                        ( min - 0.5, max + 0.5)
-                    }
-                    else { ( min, max ) };
-
-                    let min = f64::min(min, 0.0);
+                    // let ( min, max ) = if max - min < 1.0 {
+                    //     ( min - 0.5, max + 0.5)
+                    // }
+                    // else { ( min, max ) };
+                    //
+                    // let min = f64::min(min, 0.0);
 
                     // Map absolute value into grid space
                     let points = points.into_iter().map( |x| {
@@ -460,14 +467,55 @@ fn main() -> ResultDyn<()> {
 
                     use termion::cursor;
 
-                    // Draw graph boundaries
+                    // --- Drawing the graph 
+
                     println!("{}{}", termion::clear::All, cursor::Goto(1, 1));
 
-                    print!("{:>7.3} │ {}\n{:>7.3} └", max, "\n        │".repeat(28), min);
+                    // Boundaries
+                    for i in 1..=30 {
+                        print!("{}│", cursor::Goto(9, i));
+                    }
+                    print!("{}└{}", cursor::Goto(9, 31), "─".repeat(50));
 
-                    print!("{}{}", "─".repeat(50), cursor::Left(50));
-                    print!("{}{:<7.3}{}{:<7.3}", cursor::Down(1), origin, cursor::Right(40), width);
-                    print!("{}{}", cursor::Up(1), cursor::Left(50 + 5 - 1));
+                    // y-axis labels
+                    print!("{}{:>7.3}{}{:>7.3}", cursor::Goto(1, 1), max, cursor::Goto(1, 31), min);
+
+                    // x-axis labels
+                    print!("{}{:^7.3}{}{:^7.3}", cursor::Goto(9 - 2, 32), origin, cursor::Goto(59, 32), right_bound);
+
+                    // (0, 0) centered x/y axis
+                    if (origin..right_bound).contains(&0.0) {
+                        let pos = 0.0.lerp_map(origin, right_bound, 0.0, 50.0) as u16;
+
+                        if (4..46).contains(&pos) { // Don't draw on edges
+                            use termion::color;
+
+                            print!("{}0", cursor::Goto(10 + pos, 32));
+
+                            print!("{}", color::Fg(color::LightBlack));
+                            for i in 1..=30 {
+                                print!("{}┆", cursor::Goto(10 + pos, i));
+                            }
+                            print!("{}", color::Fg(color::Reset));
+                        }
+                    }
+
+                    // if (min..max).contains(&0.0) {
+                    //     let pos = 0.0.lerp_map(min, max, 30.0, 0.0) as u16; // Flip graph to use terminal coordinates
+                    //
+                    //     if (1..49).contains(&pos) { // Don't draw on edges
+                    //         use termion::color;
+                    //
+                    //         print!("{}", color::Fg(color::LightBlack));
+                    //         for i in 1..=30 {
+                    //             print!("{}┆", cursor::Goto(10 + pos, i));
+                    //         }
+                    //         print!("{}", color::Fg(color::Reset));
+                    //     }
+                    // }
+
+
+                    print!("{}", cursor::Goto(10, 31));
 
                     let braille = |bitmask| {
                         char::from_u32(0x2800_u32 + bitmask).unwrap()
@@ -487,7 +535,7 @@ fn main() -> ResultDyn<()> {
                         }
                     }
 
-                    println!("{}", cursor::Down(1));
+                    println!("{}", cursor::Goto(1, 33));
                 },
                 _ => unreachable!()
             }
